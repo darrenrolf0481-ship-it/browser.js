@@ -5,13 +5,13 @@ import { URLMeta, rewriteUrl } from "@rewriters/url";
 import { rewriteCss } from "@rewriters/css";
 import { rewriteJs } from "@rewriters/js";
 import { CookieJar } from "@/shared/cookie";
-import { config, iface } from "@/shared";
+import { config, ScramjetContext } from "@/shared";
 import { htmlRules } from "@/shared/htmlRules";
 
 const encoder = new TextEncoder();
 function rewriteHtmlInner(
 	html: string,
-	cookieJar: CookieJar,
+	context: ScramjetContext,
 	meta: URLMeta,
 	fromTop: boolean = false,
 	preRewrite?: (handler: DomHandler) => void,
@@ -23,32 +23,86 @@ function rewriteHtmlInner(
 	parser.write(html);
 	parser.end();
 	if (preRewrite) preRewrite(handler);
-	traverseParsedHtml(handler.root, cookieJar, meta);
+	traverseParsedHtml(handler.root, context, meta);
 
-	function findhead(node) {
-		if (node.type === ElementType.Tag && node.name === "head") {
-			return node as Element;
-		} else if (node.childNodes) {
-			for (const child of node.childNodes) {
-				const head = findhead(child);
-				if (head) return head;
+	let htmlRoot: Element | undefined;
+	let headElement: Element | undefined;
+	let bodyElement: Element | undefined;
+
+	function detectQuirks() {
+		for (const child of handler.root.childNodes) {
+			if (
+				child.type === ElementType.Directive ||
+				child.type === ElementType.Comment ||
+				child.type === ElementType.Text
+			) {
+				continue;
+			}
+
+			if (child.type === ElementType.Tag && child.name === "html") {
+				htmlRoot = child as Element;
+			} else {
+				// there's a child of the root that isn't an html element or a doctype/comment/text
+				return true;
 			}
 		}
 
-		return null;
+		if (!htmlRoot) return true; // no html tag or it's somewhere else other than first child
+
+		for (const child of htmlRoot.childNodes) {
+			if (
+				child.type === ElementType.Directive ||
+				child.type === ElementType.Comment ||
+				child.type === ElementType.Text
+			) {
+				continue;
+			}
+
+			if (child.type === ElementType.Tag && child.name === "head") {
+				if (bodyElement) {
+					// head comes after body
+					return true;
+				}
+				headElement = child as Element;
+			} else if (child.type === ElementType.Tag && child.name === "body") {
+				bodyElement = child as Element;
+			} else {
+				// there's a child of html that isn't head or body
+				// fine if head already exists, bad if it doesn't
+				if (!headElement) {
+					return true;
+				}
+			}
+
+			return false;
+		}
 	}
 
-	if (fromTop) {
-		let head = findhead(handler.root);
-		if (!head) {
-			head = new Element("head", {}, []);
-			handler.root.children.unshift(head);
-		}
+	let isQuirky = detectQuirks();
 
+	if (fromTop) {
 		const script = (src: string) => new Element("script", { src });
-		head.children.unshift(
-			...iface.getInjectScripts(meta, handler, config, cookieJar, script)
+		const injectScripts = context.interface.getInjectScripts(
+			meta,
+			handler,
+			script
 		);
+
+		if (isQuirky) {
+			dbg.warn(
+				`detected quirky document structure parsing @ ${meta.origin.href}!`
+			);
+			// there's weird stuff going on with the document that could result in page scripts being loaded before our inject scripts
+			// so inject them at position 0
+			handler.root.children.unshift(...injectScripts);
+		} else {
+			if (!headElement) {
+				headElement = new Element("head", {}, []);
+				htmlRoot.children.unshift(headElement);
+			}
+
+			headElement.children.unshift(...injectScripts);
+		}
 	}
 
 	if (postRewrite) postRewrite(handler);
@@ -61,7 +115,7 @@ function rewriteHtmlInner(
 
 export function rewriteHtml(
 	html: string,
-	cookieStore: CookieJar,
+	context: ScramjetContext,
 	meta: URLMeta,
 	fromTop: boolean = false,
 	preRewrite?: (handler: DomHandler) => void,
@@ -70,7 +124,7 @@ export function rewriteHtml(
 	const before = performance.now();
 	const ret = rewriteHtmlInner(
 		html,
-		cookieStore,
+		context,
 		meta,
 		fromTop,
 		preRewrite,
@@ -125,7 +179,11 @@ export function unrewriteHtml(html: string) {
 
 // i need to add the attributes in during rewriting
 
-function traverseParsedHtml(node: any, cookieStore: CookieJar, meta: URLMeta) {
+function traverseParsedHtml(
+	node: any,
+	context: ScramjetContext,
+	meta: URLMeta
+) {
 	if (node.name === "base" && node.attribs.href !== undefined) {
 		meta.base = new URL(node.attribs.href, meta.origin);
 	}
@@ -139,7 +197,7 @@ function traverseParsedHtml(node: any, cookieStore: CookieJar, meta: URLMeta) {
 				if (sel === "*" || sel.includes(node.name)) {
 					if (node.attribs[attr] !== undefined) {
 						const value = node.attribs[attr];
-						const v = rule.fn(value, meta, cookieStore);
+						const v = rule.fn(value, context, meta);
 
 						if (v === null) delete node.attribs[attr];
 						else {
@@ -156,6 +214,7 @@ function traverseParsedHtml(node: any, cookieStore: CookieJar, meta: URLMeta) {
 				node.attribs[attr] = rewriteJs(
 					value as string,
 					`(inline ${attr} on element)`,
+					context,
 					meta
 				);
 			}
@@ -163,7 +222,7 @@ function traverseParsedHtml(node: any, cookieStore: CookieJar, meta: URLMeta) {
 	}
 
 	if (node.name === "style" && node.children[0] !== undefined)
-		node.children[0].data = rewriteCss(node.children[0].data, meta);
+		node.children[0].data = rewriteCss(node.children[0].data, context, meta);
 
 	if (
 		node.name === "script" &&
@@ -184,7 +243,7 @@ function traverseParsedHtml(node: any, cookieStore: CookieJar, meta: URLMeta) {
 				for (const key in map.imports) {
 					let url = map.imports[key];
 					if (typeof url === "string") {
-						url = rewriteUrl(url, meta);
+						url = rewriteUrl(url, context, meta);
 						map.imports[key] = url;
 					}
 				}
@@ -210,6 +269,7 @@ function traverseParsedHtml(node: any, cookieStore: CookieJar, meta: URLMeta) {
 		node.children[0].data = rewriteJs(
 			js,
 			"(inline script element)",
+			context,
 			meta,
 			module
 		);
@@ -227,7 +287,7 @@ function traverseParsedHtml(node: any, cookieStore: CookieJar, meta: URLMeta) {
 		) {
 			const contentArray = node.attribs.content.split("url=");
 			if (contentArray[1])
-				contentArray[1] = rewriteUrl(contentArray[1].trim(), meta);
+				contentArray[1] = rewriteUrl(contentArray[1].trim(), context, meta);
 			node.attribs.content = contentArray.join("url=");
 		}
 	}
@@ -236,7 +296,7 @@ function traverseParsedHtml(node: any, cookieStore: CookieJar, meta: URLMeta) {
 		for (const childNode in node.childNodes) {
 			node.childNodes[childNode] = traverseParsedHtml(
 				node.childNodes[childNode],
-				cookieStore,
+				context,
 				meta
 			);
 		}
@@ -245,7 +305,11 @@ function traverseParsedHtml(node: any, cookieStore: CookieJar, meta: URLMeta) {
 	return node;
 }
 
-export function rewriteSrcset(srcset: string, meta: URLMeta) {
+export function rewriteSrcset(
+	srcset: string,
+	context: ScramjetContext,
+	meta: URLMeta
+) {
 	const sources = srcset.split(/ .*,/).map((src) => src.trim());
 	const rewrittenSources = sources.map((source) => {
 		// Split into URLs and descriptors (if any)
@@ -253,7 +317,7 @@ export function rewriteSrcset(srcset: string, meta: URLMeta) {
 		const [url, ...descriptors] = source.split(/\s+/);
 
 		// Rewrite the URLs and keep the descriptors (if any)
-		const rewrittenUrl = rewriteUrl(url.trim(), meta);
+		const rewrittenUrl = rewriteUrl(url.trim(), context, meta);
 
 		return descriptors.length > 0
 			? `${rewrittenUrl} ${descriptors.join(" ")}`

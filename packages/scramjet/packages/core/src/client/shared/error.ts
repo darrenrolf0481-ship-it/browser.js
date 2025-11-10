@@ -3,7 +3,7 @@ import { unrewriteUrl } from "@rewriters/url";
 import { ScramjetClient } from "@client/index";
 
 export const enabled = (client: ScramjetClient) =>
-	flagEnabled("cleanErrors", client.url);
+	client.flagEnabled("cleanErrors");
 
 export default function (client: ScramjetClient, _self: Self) {
 	// v8 only. all we need to do is clean the scramjet urls from stack traces
@@ -25,7 +25,7 @@ export default function (client: ScramjetClient, _self: Self) {
 			} catch {}
 
 			try {
-				newstack = newstack.replaceAll(url, unrewriteUrl(url, client.meta));
+				newstack = newstack.replaceAll(url, unrewriteUrl(url, client.context));
 			} catch {}
 		}
 

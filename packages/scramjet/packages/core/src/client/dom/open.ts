@@ -5,7 +5,8 @@ import { rewriteUrl } from "@rewriters/url";
 export default function (client: ScramjetClient) {
 	client.Proxy("window.open", {
 		apply(ctx) {
-			if (ctx.args[0]) ctx.args[0] = rewriteUrl(ctx.args[0], client.meta);
+			if (ctx.args[0])
+				ctx.args[0] = rewriteUrl(ctx.args[0], client.context, client.meta);
 
 			if (ctx.args[1] === "_top" || ctx.args[1] === "_unfencedTop")
 				ctx.args[1] = client.meta.topFrameName;
@@ -18,7 +19,11 @@ export default function (client: ScramjetClient) {
 			if (SCRAMJETCLIENT in realwin) {
 				return ctx.return(realwin[SCRAMJETCLIENT].global);
 			} else {
-				const newclient = new ScramjetClient(realwin);
+				const newclient = new ScramjetClient(
+					realwin,
+					client.context,
+					client.rpc
+				);
 				// hook the opened window
 				newclient.hook();
 

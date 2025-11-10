@@ -1,7 +1,15 @@
 import { defineConfig } from "@rspack/cli";
-import { rspack } from "@rspack/core";
+import { rspack, type RspackOptions } from "@rspack/core";
 import { RsdoctorRspackPlugin } from "@rsdoctor/rspack-plugin";
 import { TsCheckerRspackPlugin } from "ts-checker-rspack-plugin";
+
+function nodeExternals({ context, request }, callback) {
+	if (!/^(\.|\/)/.test(request)) {
+		return callback(null, request);
+	}
+
+	callback();
+}
 
 import { readFile } from "node:fs/promises";
 import { execSync } from "node:child_process";
@@ -24,12 +32,14 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
 // Project directories
 const scramjetdir = join(__dirname, "packages/core");
+const controllerdir = join(__dirname, "packages/controller");
+const bootstrapdir = join(__dirname, "packages/bootstrap");
 
 // Load WASM for rewriter
 const sjpackagemeta = JSON.parse(
 	await readFile(join(scramjetdir, "package.json"), "utf-8")
 );
-const wasmPath = join(scramjetdir, "rewriter/wasm/out/optimized.wasm");
+const wasmPath = join(scramjetdir, "dist/scramjet.wasm.wasm");
 let wasmB64: string;
 const wasmBuf = await readFile(wasmPath);
 wasmB64 = wasmBuf.toString("base64");
@@ -54,21 +64,31 @@ export const tsloader = {
 	type: "javascript/auto",
 };
 
-// Common configuration options for scramjet builds
-const createScramjetConfig = (options) => {
-	const { entry, output, rewriterWasm, extraConfig = {} } = options;
+function deepmerge(target, source) {
+	const output = { ...target };
+	if (isObject(target) && isObject(source)) {
+		Object.keys(source).forEach((key) => {
+			if (isObject(source[key])) {
+				if (!(key in target)) Object.assign(output, { [key]: source[key] });
+				else output[key] = deepmerge(target[key], source[key]);
+			} else {
+				Object.assign(output, { [key]: source[key] });
+			}
+		});
+	}
+	return output;
+}
 
-	return defineConfig({
-		mode: "development",
+function isObject(item) {
+	return item && typeof item === "object" && !Array.isArray(item);
+}
+
+const createGenericConfig = (options) => {
+	const def: RspackOptions = {
 		devtool: "source-map",
-		entry,
+		mode: "development",
 		resolve: {
 			extensions: [".ts", ".js"],
-			alias: {
-				"@rewriters": join(scramjetdir, "src/shared/rewriters"),
-				"@client": join(scramjetdir, "src/client"),
-				"@": join(scramjetdir, "src"),
-			},
 		},
 		module: {
 			rules: [tsloader],
@@ -77,6 +97,32 @@ const createScramjetConfig = (options) => {
 					overrideStrict: "non-strict",
 					dynamicImportMode: "eager",
 				},
+			},
+		},
+		optimization: {
+			minimizer: [
+				new rspack.SwcJsMinimizerRspackPlugin({
+					minimizerOptions: {
+						module: options.output.libraryTarget === "module",
+					},
+				}),
+			],
+		},
+	};
+	return defineConfig(deepmerge(def, options));
+};
+
+// Common configuration options for scramjet builds
+const createScramjetConfig = (options) => {
+	const { entry, output, rewriterWasm, extraConfig = {} } = options;
+
+	return createGenericConfig({
+		entry,
+		resolve: {
+			alias: {
+				"@rewriters": join(scramjetdir, "src/shared/rewriters"),
+				"@client": join(scramjetdir, "src/client"),
+				"@": join(scramjetdir, "src"),
 			},
 		},
 		output,
@@ -90,10 +136,10 @@ const createScramjetConfig = (options) => {
 				dbg: [join(scramjetdir, "src/log.ts"), "default"],
 			}),
 			new rspack.DefinePlugin({
-				VERSION: JSON.stringify(sjpackagemeta.version),
+				REWRITERWASM: rewriterWasm,
 			}),
 			new rspack.DefinePlugin({
-				REWRITERWASM: rewriterWasm,
+				VERSION: JSON.stringify(sjpackagemeta.version),
 			}),
 			new rspack.DefinePlugin({
 				COMMITHASH: (() => {
@@ -109,6 +155,9 @@ const createScramjetConfig = (options) => {
 						return "unknown";
 					}
 				})(),
+			}),
+			new rspack.DefinePlugin({
+				BUILDDATE: JSON.stringify(new Date().toISOString()),
 			}),
 			process.env.DEBUG
 				? new RsdoctorRspackPlugin({
@@ -216,9 +265,61 @@ const moduleConfig = createScramjetConfig({
 	},
 });
 
+const bootstrapConfig = createGenericConfig({
+	entry: {
+		main: join(bootstrapdir, "src/index.ts"),
+	},
+	output: {
+		filename: "bootstrap.js",
+		path: join(bootstrapdir, "dist"),
+		iife: false,
+		libraryTarget: "module",
+	},
+	experiments: {
+		outputModule: true,
+	},
+	target: "node",
+	externals: [nodeExternals],
+});
+
+const controllerConfig = createGenericConfig({
+	entry: {
+		api: join(controllerdir, "src/index.ts"),
+		sw: join(controllerdir, "src/sw.ts"),
+	},
+	output: {
+		filename: "controller.[name].js",
+		path: join(controllerdir, "dist"),
+		iife: true,
+		library: {
+			type: "var",
+			name: "$scramjetController",
+		},
+	},
+});
+
+const libcurldir = join(__dirname, "packages/libcurl-transport");
+const libcurlTransportConfig = createGenericConfig({
+	entry: {
+		main: join(libcurldir, "index.ts"),
+	},
+	output: {
+		filename: "libcurl-transport.js",
+		path: join(libcurldir, "dist"),
+		iife: true,
+		library: {
+			type: "var",
+			name: "$libcurlTransport",
+		},
+	},
+});
+
 export default [
 	iifeConfig,
 	iifeBundledConfig,
 	moduleConfig,
 	moduleBundledConfig,
+	bootstrapConfig,
+	controllerConfig,
+	libcurlTransportConfig,
 ];

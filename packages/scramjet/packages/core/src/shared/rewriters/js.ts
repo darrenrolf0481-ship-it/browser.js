@@ -1,4 +1,4 @@
-import { config, flagEnabled } from "@/shared";
+import { config, flagEnabled, ScramjetContext } from "@/shared";
 import { URLMeta } from "@rewriters/url";
 
 import { getRewriter, JsRewriterOutput, textDecoder } from "@rewriters/wasm";
@@ -14,10 +14,16 @@ type RewriterResult = {
 function rewriteJsWasm(
 	input: string | Uint8Array,
 	source: string | null,
+	context: ScramjetContext,
 	meta: URLMeta,
 	module: boolean
 ): RewriterResult {
-	let [rewriter, ret] = getRewriter(meta);
+	let [rewriter, ret] = getRewriter(context, meta);
+
+	let flagsobj = {};
+	for (const flag of Object.keys(context.config.flags)) {
+		flagsobj[flag] = flagEnabled(flag as any, context, meta.base);
+	}
 
 	try {
 		let out: JsRewriterOutput;
@@ -25,6 +31,12 @@ function rewriteJsWasm(
 		// try {
 		if (typeof input === "string") {
 			out = rewriter.rewrite_js(
+				{
+					...context.config.globals,
+					prefix: context.prefix.pathname,
+				},
+				flagsobj,
+				context.interface.codecEncode,
 				input,
 				meta.base.href,
 				source || "(unknown)",
@@ -32,6 +44,12 @@ function rewriteJsWasm(
 			);
 		} else {
 			out = rewriter.rewrite_js_bytes(
+				{
+					...context.config.globals,
+					prefix: context.prefix.pathname,
+				},
+				flagsobj,
+				context.interface.codecEncode,
 				input,
 				meta.base.href,
 				source || "(unknown)",
@@ -67,31 +85,33 @@ function rewriteJsWasm(
 export function rewriteJsInner(
 	js: string | Uint8Array,
 	url: string | null,
+	context: ScramjetContext,
 	meta: URLMeta,
 	module = false
 ) {
-	return rewriteJsWasm(js, url, meta, module);
+	return rewriteJsWasm(js, url, context, meta, module);
 }
 
 export function rewriteJs(
 	js: string | Uint8Array,
 	url: string | null,
+	context: ScramjetContext,
 	meta: URLMeta,
 	module = false
 ): string | Uint8Array {
 	try {
-		const res = rewriteJsInner(js, url, meta, module);
+		const res = rewriteJsInner(js, url, context, meta, module);
 		let newjs = res.js;
 
-		if (flagEnabled("sourcemaps", meta.base)) {
-			const pushmap = globalThis[config.globals.pushsourcemapfn];
+		if (flagEnabled("sourcemaps", context, meta.base)) {
+			const pushmap = globalThis[context.config.globals.pushsourcemapfn];
 			if (pushmap) {
 				pushmap(Array.from(res.map), res.tag);
 			} else {
 				if (newjs instanceof Uint8Array) {
 					newjs = new TextDecoder().decode(newjs);
 				}
-				const sourcemapfn = `${config.globals.pushsourcemapfn}([${res.map.join(",")}], "${res.tag}");`;
+				const sourcemapfn = `${context.config.globals.pushsourcemapfn}([${res.map.join(",")}], "${res.tag}");`;
 
 				// don't put the sourcemap call before "use strict"
 				const strictMode = /^\s*(['"])use strict\1;?/;
@@ -103,7 +123,7 @@ export function rewriteJs(
 			}
 		}
 
-		if (flagEnabled("rewriterLogs", meta.base)) {
+		if (flagEnabled("rewriterLogs", context, meta.base)) {
 			for (const error of res.errors) {
 				console.error("oxc parse error", error);
 			}
@@ -117,7 +137,7 @@ export function rewriteJs(
 			err.message,
 			js instanceof Uint8Array ? textDecoder.decode(js) : js
 		);
-		if (flagEnabled("allowInvalidJs", meta.base)) {
+		if (flagEnabled("allowInvalidJs", context, meta.base)) {
 			return js;
 		} else {
 			throw err;

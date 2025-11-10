@@ -6,10 +6,18 @@ import { createLocationProxy } from "@client/location";
 import { createWrapFn } from "@client/shared/wrap";
 import { NavigateEvent } from "@client/events";
 import { rewriteUrl, unrewriteUrl, type URLMeta } from "@rewriters/url";
-import { bareTransport, config, flagEnabled } from "@/shared";
+import {
+	bareTransport,
+	ClientRPCDefs,
+	config,
+	flagEnabled,
+	ScramjetContext,
+	ScramjetInterface,
+} from "@/shared";
 import { CookieJar } from "@/shared/cookie";
 import { iswindow } from "./entry";
 import { SingletonBox } from "./singletonbox";
+import { ScramjetConfig } from "@/types";
 
 type NativeStore = {
 	store: Record<string, any>;
@@ -105,8 +113,6 @@ export class ScramjetClient {
 	descriptors: DescriptorStore;
 	wrapfn: (i: any, ...args: any) => any;
 
-	cookieStore = new CookieJar();
-
 	eventcallbacks: Map<
 		any,
 		[
@@ -122,7 +128,11 @@ export class ScramjetClient {
 
 	box: SingletonBox;
 
-	constructor(public global: typeof globalThis) {
+	constructor(
+		public global: typeof globalThis,
+		public context: ScramjetContext,
+		public rpc: ClientRPCDefs
+	) {
 		if (SCRAMJETCLIENT in global) {
 			console.error(
 				"attempted to initialize a scramjet client, but one is already loaded - this is very bad"
@@ -356,7 +366,6 @@ export class ScramjetClient {
 					return frame.name;
 				}
 			},
-			prefix: new URL(location.origin + config.prefix),
 		};
 		this.locationProxy = createLocationProxy(this, global);
 
@@ -399,9 +408,6 @@ export class ScramjetClient {
 
 		return false;
 	}
-	loadcookies(cookiestr: string) {
-		this.cookieStore.load(cookiestr);
-	}
 
 	hook() {
 		const context = import.meta.webpackContext(".", {
@@ -437,7 +443,7 @@ export class ScramjetClient {
 	}
 
 	get url(): URL {
-		return new URL(unrewriteUrl(this.global.location.href, this.meta));
+		return new URL(this.unrewriteUrl(this.global.location.href));
 	}
 
 	set url(url: URL | string) {
@@ -449,7 +455,7 @@ export class ScramjetClient {
 		}
 		if (ev.defaultPrevented) return;
 
-		this.global.location.href = rewriteUrl(ev.url, this.meta);
+		this.global.location.href = this.rewriteUrl(ev.url);
 	}
 
 	// below are the utilities for proxying and trapping dom APIs
@@ -547,10 +553,11 @@ export class ScramjetClient {
 
 				const pst = Error.prepareStackTrace;
 
+				let client = this;
 				Error.prepareStackTrace = function (err, s) {
 					if (
 						s[0].getFileName() &&
-						!s[0].getFileName().startsWith(location.origin + config.prefix)
+						!s[0].getFileName().startsWith(client.context.prefix.href)
 					) {
 						return { stack: err.stack };
 					}
@@ -564,7 +571,7 @@ export class ScramjetClient {
 							//@ts-expect-error i'm not going to explain this
 							err.stack = err.stack.stack;
 							console.error("ERROR FROM SCRAMJET INTERNALS", err);
-							if (!flagEnabled("allowFailedIntercepts", this.url)) {
+							if (!this.flagEnabled("allowFailedIntercepts")) {
 								throw err;
 							}
 						} else {
@@ -673,5 +680,17 @@ export class ScramjetClient {
 		Object.defineProperty(target, prop, desc);
 
 		return oldDescriptor;
+	}
+
+	rewriteUrl(url: string | URL): string {
+		return rewriteUrl(url, this.context, this.meta);
+	}
+
+	unrewriteUrl(url: string | URL): string {
+		return unrewriteUrl(url, this.context);
+	}
+
+	flagEnabled(flag: keyof ScramjetConfig["flags"]): boolean {
+		return flagEnabled(flag, this.context, this.url);
 	}
 }

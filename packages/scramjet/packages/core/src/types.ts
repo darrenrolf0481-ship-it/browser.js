@@ -8,10 +8,12 @@ import { DBSchema } from "idb";
  * Contains both the semantic version string and the git commit hash for build identification.
  */
 export interface ScramjetVersionInfo {
-	/** The git commit hash that this build was created from */
-	build: string;
 	/** The semantic version */
 	version: string;
+	/** The git commit hash that this build was created from */
+	build: string;
+	/** The date of the build */
+	date: string;
 }
 
 /**
@@ -31,8 +33,6 @@ export type ScramjetFlags = {
 };
 
 export interface ScramjetConfig {
-	wisp: string;
-	prefix: string;
 	globals: {
 		wrapfn: string;
 		wrappropertybase: string;
@@ -48,12 +48,9 @@ export interface ScramjetConfig {
 		tempunusedid: string;
 	};
 	maskedfiles: string[];
+	allowedwebsockets: string[];
 	flags: ScramjetFlags;
 	siteFlags: Record<string, Partial<ScramjetFlags>>;
-	codec: {
-		encode: string;
-		decode: string;
-	};
 }
 
 /**
